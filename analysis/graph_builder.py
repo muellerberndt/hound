@@ -331,10 +331,10 @@ class GraphBuilder:
                 self._emit("graph", f"Created graph: {graph_spec['name']} (focus: {focus})")
             return
         
-        # Use ALL cards for discovery to get complete understanding of the codebase
+        # Use adaptive sampling based on content size, not count
         self._emit("discover", "Analyzing codebase for graph discovery...")
-        # Try to use all cards, only sample if absolutely necessary
-        code_samples = self._sample_cards(cards, len(cards))
+        # Auto-sample based on content size to stay within context limits
+        code_samples = self._sample_cards(cards, target_size_mb=2.0)
         
         # Allow forcing specific graph type through focus_areas (backward compatibility)
         if focus_areas and "call_graph" in focus_areas:
@@ -427,10 +427,10 @@ The FIRST must be the system/component/flow overview."""
             orphan_count = len(self._get_orphaned_nodes(graph))
             self._emit("graph_build", f"{graph_name}: {len(graph.nodes)}N/{len(graph.edges)}E, {orphan_count} orphans")
             
-            # Use ALL cards whenever possible - only sample if truly necessary
-            relevant_cards = self._sample_cards(cards, len(cards))
+            # Use adaptive sampling based on content size to respect context limits
+            relevant_cards = self._sample_cards(cards, target_size_mb=2.0)
             if len(relevant_cards) != len(cards):
-                self._emit("sample", f"Had to sample {len(relevant_cards)} cards from {len(cards)} total")
+                self._emit("sample", f"Sampled {len(relevant_cards)} cards from {len(cards)} total for context limits")
             
             # Update the graph
             update = self._update_graph(graph, relevant_cards)
@@ -636,10 +636,9 @@ Return empty lists only if graph is fully connected."""
     def _sample_cards(
         self,
         cards: List[Dict],
-        n: int,
-        focus: Optional[str] = None
+        target_size_mb: float = 2.0
     ) -> List[Dict]:
-        """Sample relevant cards for analysis with adaptive sizing"""
+        """Adaptive sampling based on content size instead of count"""
         
         # Calculate total size of cards
         total_size = sum(
@@ -649,22 +648,24 @@ Return empty lists only if graph is fully connected."""
             for card in cards
         )
         
-        # MUCH HIGHER threshold - we want to use ALL cards whenever possible
-        # Modern LLMs can handle large contexts, and complete context gives better results
-        # The model needs to see the ENTIRE codebase to understand relationships properly
-        # Only sample for genuinely massive codebases that would exceed context limits
-        SIZE_THRESHOLD = 2000000  # 2MB threshold - only sample for really huge codebases
+        # Convert MB to bytes
+        size_threshold = int(target_size_mb * 1_000_000)
         
-        if total_size <= SIZE_THRESHOLD or n >= len(cards):
+        # If under threshold, use all cards
+        if total_size <= size_threshold:
             if self.debug:
-                print(f"      Using ALL {len(cards)} cards (total size: {total_size:,} chars)")
+                print(f"      Using ALL {len(cards)} cards (total size: {total_size:,} chars < {size_threshold:,} threshold)")
             return cards
         
-        # Only sample if we absolutely have to (very large codebases)
-        import random
-        sample_size = min(n, len(cards))
+        # Calculate proportional sample size to stay under threshold
+        ratio = size_threshold / total_size
+        sample_size = max(1, int(len(cards) * ratio))
+        
         if self.debug:
-            print(f"      WARNING: Large codebase - sampling {sample_size} cards from {len(cards)} total (size: {total_size:,} chars > {SIZE_THRESHOLD:,} threshold)")
+            print(f"      WARNING: Large codebase - sampling {sample_size} cards from {len(cards)} total (size: {total_size:,} chars > {size_threshold:,} threshold, ratio: {ratio:.3f})")
+        
+        # Use original file diversity sampling logic
+        import random
         
         # Try to sample from different files if possible
         files_to_cards = {}
@@ -693,8 +694,33 @@ Return empty lists only if graph is fully connected."""
             additional = min(sample_size - len(sampled), len(remaining))
             sampled.extend(random.sample(remaining, additional))
         
+        # Verify we're under the size threshold, trim if needed
+        sampled_size = sum(
+            len(card.get("content", "")) + 
+            len(card.get("peek_head", "")) + 
+            len(card.get("peek_tail", ""))
+            for card in sampled
+        )
+        
+        # If still over threshold, remove cards until we fit
+        while sampled_size > size_threshold and len(sampled) > 1:
+            # Remove the smallest card
+            smallest_idx = 0
+            smallest_size = len(sampled[0].get("content", ""))
+            for i, card in enumerate(sampled[1:], 1):
+                card_size = len(card.get("content", ""))
+                if card_size < smallest_size:
+                    smallest_size = card_size
+                    smallest_idx = i
+            
+            removed_card = sampled.pop(smallest_idx)
+            sampled_size -= (len(removed_card.get("content", "")) + 
+                           len(removed_card.get("peek_head", "")) + 
+                           len(removed_card.get("peek_tail", "")))
+        
         if self.debug:
-            print(f"      Sampled {len(sampled)} cards from {len(set(c.get('relpath', 'unknown') for c in sampled))} files")
+            print(f"      Sampled {len(sampled)} cards from {len(set(c.get('relpath', 'unknown') for c in sampled))} files (final size: {sampled_size:,} chars)")
+        
         return sampled
     
     def _load_manifest(self, manifest_dir: Path) -> tuple:
