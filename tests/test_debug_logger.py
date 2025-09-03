@@ -28,7 +28,7 @@ class TestDebugLogger(unittest.TestCase):
             schema=None,
             duration=0.12,
             error=None,
-            tool_calls=[{"tool_name": "echo", "parameters": {"x": 1}}]
+            tool_calls=[{"tool_name": "echo", "parameters": {"x": 1}}],
         )
 
         # File contains prompts and response

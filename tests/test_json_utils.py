@@ -18,11 +18,10 @@ class TestJsonUtils(unittest.TestCase):
         """
         obj = extract_json_object(text)
         self.assertIsInstance(obj, dict)
-        self.assertEqual(obj.get('a'), 1)
+        self.assertEqual(obj.get("a"), 1)
 
     def test_extract_balanced(self):
-        text = "Noise before {\n  \"k\": [1,2,3,],\n} and after"
+        text = 'Noise before {\n  "k": [1,2,3,],\n} and after'
         obj = extract_json_object(text)
         self.assertIsInstance(obj, dict)
-        self.assertEqual(obj.get('k'), [1, 2, 3])
-
+        self.assertEqual(obj.get("k"), [1, 2, 3])

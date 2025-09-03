@@ -16,9 +16,11 @@ class TestReportCLI(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         # minimal project structure
-        (self.tmp / 'graphs').mkdir(parents=True, exist_ok=True)
-        (self.tmp / 'graphs' / 'graph_SystemArchitecture.json').write_text('{"nodes":[],"edges":[]}')
-        (self.tmp / 'hypotheses.json').write_text('{"hypotheses": {}}')
+        (self.tmp / "graphs").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "graphs" / "graph_SystemArchitecture.json").write_text(
+            '{"nodes":[],"edges":[]}'
+        )
+        (self.tmp / "hypotheses.json").write_text('{"hypotheses": {}}')
         # project manager expects a record; patch ProjectManager.get_project
 
     def tearDown(self):
@@ -26,9 +28,11 @@ class TestReportCLI(unittest.TestCase):
 
     def test_report_cli_invokes_generator(self):
         runner = CliRunner()
-        with patch('commands.report.ProjectManager') as PM, \
-             patch('commands.graph.load_config') as load_cfg, \
-             patch('commands.report.ReportGenerator') as RG:
+        with (
+            patch("commands.report.ProjectManager") as PM,
+            patch("commands.graph.load_config") as load_cfg,
+            patch("commands.report.ReportGenerator") as RG,
+        ):
             pm = MagicMock()
             PM.return_value = pm
             pm.get_project.return_value = {"path": str(self.tmp), "source_path": str(self.tmp)}
