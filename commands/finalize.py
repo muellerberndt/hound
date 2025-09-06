@@ -47,6 +47,7 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
         sys.exit(1)
     
     project_dir = Path(project["path"])
+    manifest_dir = project_dir / "manifest"
     
     # Check for existing hypotheses
     hypothesis_file = project_dir / "hypotheses.json"
@@ -168,20 +169,21 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
     # No pre-filtering, proceed directly to review
     
     # Load manifest for source code access
-    manifest_dir = project_dir / "manifest"
     manifest_file = manifest_dir / "manifest.json"
     manifest_data = {}
     if manifest_file.exists():
         with open(manifest_file) as f:
             manifest_data = json.load(f)
     
-    # Get repository root
+    # Get repository root (prefer manifest, fallback to project source_path)
     repo_root = None
     if manifest_data.get("repo_path"):
-        repo_root = Path(manifest_data["repo_path"])
-        if not repo_root.exists():
-            console.print(f"[yellow]Warning: Repository path not found: {repo_root}[/yellow]")
-            repo_root = None
+        repo_root = Path(manifest_data["repo_path"]).resolve()
+    if (not repo_root or not repo_root.exists()) and project.get('source_path'):
+        repo_root = Path(project['source_path']).resolve()
+    if repo_root and not repo_root.exists():
+        console.print(f"[yellow]Warning: Repository path not found: {repo_root}[/yellow]")
+        repo_root = None
     
     # Process candidates for review
     if not candidates:
@@ -243,7 +245,7 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
                 except Exception:
                     pass
                 
-                # Load source code
+                # Load source code (direct from repo when possible)
                 source_code = {}
                 if source_files and repo_root:
                     for file_path in source_files[:10]:  # Load up to 10 files
@@ -257,6 +259,72 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
                         except Exception as e:
                             if debug:
                                 progress.console.print(f"  [red]Failed to load {file_path}: {e}[/red]")
+                if source_code:
+                    progress.console.print(f"  [dim]Loaded {len(source_code)} file(s) from source_files[/dim]")
+                
+                # Independent search: if still empty, scan repo_root for relevant files
+                if not source_code and repo_root:
+                    if debug:
+                        progress.console.print("  [dim]Searching repository for relevant files...[/dim]")
+                    try:
+                        # Build simple keyword set from hypothesis text
+                        kw = set()
+                        for k in (hypothesis.get('title', ''), hypothesis.get('description', ''), hypothesis.get('reasoning', '')):
+                            for token in (k or '').replace('\n', ' ').split():
+                                token = token.strip(".,:;(){}[]'\"<>\n\r\t")
+                                if len(token) >= 3 and token.isascii():
+                                    kw.add(token.lower())
+                        # Include affected function names
+                        for fn in hypothesis.get('properties', {}).get('affected_functions', []) or []:
+                            if isinstance(fn, str) and fn:
+                                kw.add(fn.lower())
+                        # Scan for relevant files by name/ext and keyword hits
+                        exts = {'.rs','.py','.ts','.tsx','.js','.jsx','.go','.sol','.java','.kt','.swift','.c','.cc','.cpp','.h','.hpp','.yaml','.yml','.toml','.json','.sql','.sh','.rb','.php'}
+                        candidates: list[tuple[int, Path]] = []
+                        max_files = 10
+                        for p in repo_root.rglob('*'):
+                            try:
+                                if not p.is_file():
+                                    continue
+                                if p.suffix.lower() not in exts:
+                                    continue
+                                # Light size cap to avoid huge files
+                                if p.stat().st_size > 400_000:
+                                    continue
+                                name_score = 0
+                                lname = p.name.lower()
+                                for t in kw:
+                                    if t and t in lname:
+                                        name_score += 2
+                                if name_score == 0 and not source_files:
+                                    # Avoid reading too many files with no hint
+                                    continue
+                                # Read and score by keyword occurrences
+                                score = name_score
+                                try:
+                                    text = p.read_text(encoding='utf-8', errors='ignore')
+                                    ltext = text.lower()
+                                    hits = sum(ltext.count(t) for t in kw if len(t) > 3)
+                                    score += hits
+                                except Exception:
+                                    continue
+                                if score > 0:
+                                    candidates.append((score, p))
+                            except Exception:
+                                continue
+                        candidates.sort(key=lambda x: x[0], reverse=True)
+                        before = len(source_code)
+                        for _, fp in candidates[:max_files]:
+                            try:
+                                rel = str(fp.relative_to(repo_root))
+                                source_code[rel] = fp.read_text(encoding='utf-8', errors='ignore')
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    added = len(source_code) - (before if 'before' in locals() else 0)
+                    if added > 0:
+                        progress.console.print(f"  [dim]Repo search added {added} file(s)[/dim]")
                 
                 # Build review prompt
                 review_prompt = f"""You are a security expert performing final review of a vulnerability hypothesis.

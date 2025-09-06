@@ -114,7 +114,7 @@ class Finalizer(AutonomousAgent):
             # Load source code directly if available
             source_code = {}
             if source_files and self._repo_root:
-                for file_path in source_files[:5]:  # Limit to 5 files
+                for file_path in source_files[:10]:  # Limit to 10 files
                     try:
                         full_path = self._repo_root / file_path
                         if full_path.exists():
@@ -122,6 +122,80 @@ class Finalizer(AutonomousAgent):
                                 source_code[file_path] = f.read()
                     except Exception as e:
                         print(f"[!] Failed to load {file_path}: {e}")
+            if progress_callback and source_code:
+                try:
+                    progress_callback({'status': 'info', 'message': f"Loaded {len(source_code)} file(s) from source_files"})
+                except Exception:
+                    pass
+
+            # Independent repo search: augment context with likely relevant files
+            if self._repo_root:
+                try:
+                    # Build keyword set from hypothesis
+                    kw = set()
+                    for k in (hypothesis.get('title', ''), hypothesis.get('description', ''), hypothesis.get('reasoning', '')):
+                        for token in (k or '').replace('\n', ' ').split():
+                            token = token.strip(".,:;(){}[]'\"<>\n\r\t")
+                            if len(token) >= 3 and token.isascii():
+                                kw.add(token.lower())
+                    for fn in hypothesis.get('properties', {}).get('affected_functions', []) or []:
+                        if isinstance(fn, str) and fn:
+                            kw.add(fn.lower())
+                    exts = {'.rs','.py','.ts','.tsx','.js','.jsx','.go','.sol','.java','.kt','.swift','.c','.cc','.cpp','.h','.hpp','.yaml','.yml','.toml','.json','.sql','.sh','.rb','.php'}
+                    candidates: list[tuple[int, Path]] = []
+                    # Limit total files included to 10 (including any preloaded)
+                    max_include = 10
+                    for p in self._repo_root.rglob('*'):
+                        try:
+                            if not p.is_file():
+                                continue
+                            if p.suffix.lower() not in exts:
+                                continue
+                            if p.stat().st_size > 400_000:
+                                continue
+                            name_score = 0
+                            lname = p.name.lower()
+                            for t in kw:
+                                if t and t in lname:
+                                    name_score += 2
+                            score = name_score
+                            try:
+                                text = p.read_text(encoding='utf-8', errors='ignore')
+                                ltext = text.lower()
+                                hits = sum(ltext.count(t) for t in kw if len(t) > 3)
+                                score += hits
+                            except Exception:
+                                continue
+                            if score > 0:
+                                candidates.append((score, p))
+                        except Exception:
+                            continue
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    # Add up to the cap, skipping files already included
+                    already = set(source_code.keys())
+                    before = len(source_code)
+                    for _, fp in candidates:
+                        if len(source_code) >= max_include:
+                            break
+                        try:
+                            rel = str(fp.relative_to(self._repo_root))
+                            if rel in already:
+                                continue
+                            source_code[rel] = fp.read_text(encoding='utf-8', errors='ignore')
+                            already.add(rel)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                else:
+                    # Only if no exception and we scanned
+                    if progress_callback:
+                        try:
+                            added = len(source_code) - (before if 'before' in locals() else 0)
+                            if added > 0:
+                                progress_callback({'status': 'info', 'message': f"Repo search added {added} file(s)"})
+                        except Exception:
+                            pass
 
             # Build review context with source code
             review_context = self._build_review_context(hyp_id, hypothesis, source_code)
