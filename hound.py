@@ -112,8 +112,9 @@ def project_info(name: str = typer.Argument(..., help="Project name")):
 @project_app.command("coverage")
 def project_coverage(name: str = typer.Argument(..., help="Project name")):
     """Show coverage metrics for a project (nodes and cards)."""
-    from analysis.coverage_index import CoverageIndex
     import json as _json
+
+    from analysis.coverage_index import CoverageIndex
     manager = ProjectManager()
     proj = manager.get_project(name)
     if not proj:
@@ -634,6 +635,47 @@ def graph_build(
         quiet=quiet
     )
 
+@graph_app.command("ingest")
+def graph_ingest(
+    target: str = typer.Argument(..., help="Project name or repository path"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Configuration file"),
+    files: str | None = typer.Option(None, "--files", "-f", help="Comma-separated file paths to include"),
+    manual_chunking: bool = typer.Option(False, "--manual-chunking", help="Split files using manual markers instead of automatic chunking"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug output")
+):
+    """Ingest repository to create manifest and bundles."""
+    from commands.graph import ingest as graph_ingest_impl
+    manager = ProjectManager()
+    
+    proj = manager.get_project(target)
+    if proj:
+        # Target is a project name
+        repo_path = proj.get('source_path')
+        if not repo_path:
+            console.print(f"[red]No source_path found for project '{target}'.[/red]")
+            raise typer.Exit(1)
+        project_path = manager.get_project_path(target)
+        output_dir = project_path / "manifest"
+        console.print(f"[cyan]Using project:[/cyan] {target} (repo: {repo_path})")
+    else:
+        # Target is direct repo_path
+        repo_path = target
+        output_dir = Path(".hound_cache") / Path(repo_path).name
+    
+    # Ensure repo_path exists
+    if not Path(repo_path).exists():
+        console.print(f"[red]Repository path not found: {repo_path}[/red]")
+        raise typer.Exit(1)
+    
+    graph_ingest_impl(
+        repo_path=repo_path,
+        output_dir=str(output_dir),
+        config_path=Path(config) if config else None,
+        file_filter=files,
+        manual_chunking=manual_chunking,
+        debug=debug
+    )
+
 @graph_app.command("custom")
 def graph_custom(
     project: str = typer.Argument(..., help="Project name"),
@@ -781,6 +823,46 @@ def graph_export(
         console.print(f"[red]Error exporting visualization:[/red] {str(e)}")
         raise typer.Exit(1)
 
+@graph_app.command("export-cards")
+def graph_export_cards(
+    project: str = typer.Argument(..., help="Project name"),
+    output: str = typer.Option(None, "--output", "-o", help="Output JSON file path (defaults to project_dir/full_cards.json)")
+):
+    """Export full cards with content for a project."""
+    import json
+    from pathlib import Path
+
+    from analysis.cards import extract_card_content, load_card_index
+    manager = ProjectManager()
+    proj = manager.get_project(project)
+    if not proj:
+        console.print(f"[red]Project '{project}' not found.[/red]")
+        raise typer.Exit(1)
+    project_path = manager.get_project_path(project)
+    manifest_dir = project_path / 'manifest'
+    graphs_dir = project_path / 'graphs'
+    # Load manifest to get repo_path
+    with open(manifest_dir / 'manifest.json') as f:
+        manifest = json.load(f)
+    repo_root = Path(manifest['repo_path'])
+    # Load card index (using a metadata file; adjust if no master.json)
+    card_index, _ = load_card_index(graphs_dir / 'master.json', manifest_dir)
+    # Extract full content
+    full_cards = {}
+    for card_id, card in card_index.items():
+        full_cards[card_id] = {
+            **card,
+            'content': extract_card_content(card, repo_root)
+        }
+    # Determine output path
+    if not output:
+        output_path = project_path / 'full_cards.json'
+    else:
+        output_path = Path(output)
+    # Save
+    with open(output_path, 'w') as f:
+        json.dump(full_cards, f, indent=2)
+    console.print(f"[green]✓ Exported {len(full_cards)} full cards to {output_path}[/green]")
 
 @graph_app.command("reset")
 def graph_reset(

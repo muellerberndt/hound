@@ -691,6 +691,7 @@ def ingest(
     output_dir: str | None = typer.Option(None, "--output", "-o", help="Output directory"),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Path to config.yaml"),
     file_filter: str | None = typer.Option(None, "--files", "-f", help="Comma-separated file paths"),
+    manual_chunking: bool = typer.Option(False, "--manual-chunking", help="Split files using manual markers instead of automatic chunking"),
     debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug output"),
 ):
     """Ingest repository and create bundles."""
@@ -723,7 +724,7 @@ def ingest(
     ) as progress:
         # Create manifest
         task1 = progress.add_task("Creating repository manifest...", total=100)
-        manifest = RepositoryManifest(repo_path, config, file_filter=files_to_include)
+        manifest = RepositoryManifest(repo_path, config, file_filter=files_to_include, manual_chunking=manual_chunking)
         cards, files = manifest.walk_repository()
         manifest_info = manifest.save_manifest(output_dir)
         progress.update(task1, completed=100)

@@ -40,7 +40,7 @@ class FileInfo:
 class RepositoryManifest:
     """Manages repository ingestion and card creation."""
     
-    def __init__(self, repo_path: str, config: dict, file_filter: list[str] | None = None):
+    def __init__(self, repo_path: str, config: dict, file_filter: list[str] | None = None, manual_chunking: bool = False):
         """Initialize manifest with repository path and config.
         
         Args:
@@ -51,6 +51,7 @@ class RepositoryManifest:
         self.repo_path = Path(repo_path).resolve()
         self.config = config
         self.file_filter = file_filter  # List of specific files to include
+        self.manual_chunking = manual_chunking
         self.cards: list[Card] = []
         self.files: list[FileInfo] = []
         self.file_extensions = self._get_file_extensions()
@@ -144,16 +145,24 @@ class RepositoryManifest:
         relpath = str(file_path.relative_to(self.repo_path))
         
         # Split into chunks at natural boundaries
-        chunks = self._split_into_chunks(content)
+        raw_chunks = self._split_into_chunks(content, file_path)
         
         cards = []
-        char_offset = 0
         
-        for i, chunk in enumerate(chunks):
-            if not chunk.strip():
-                char_offset += len(chunk)
-                continue
-            
+        if self.manual_chunking:
+            chunks_with_pos = raw_chunks  # Already list of (content, start, end)
+        else:
+            chunks_with_pos = []
+            char_offset = 0
+            for chunk in raw_chunks:
+                chunk_len = len(chunk)
+                if not chunk.strip():
+                    char_offset += chunk_len
+                    continue
+                chunks_with_pos.append((chunk, char_offset, char_offset + chunk_len))
+                char_offset += chunk_len
+        
+        for i, (chunk, char_start, char_end) in enumerate(chunks_with_pos):
             card_id = self._generate_card_id(relpath, i, chunk)
             
             # Extract metadata
@@ -163,8 +172,8 @@ class RepositoryManifest:
             card = Card(
                 id=card_id,
                 relpath=relpath,
-                char_start=char_offset,
-                char_end=char_offset + len(chunk),
+                char_start=char_start,
+                char_end=char_end,
                 content=chunk,
                 peek_head=peek_head,
                 peek_tail=peek_tail,
@@ -173,43 +182,82 @@ class RepositoryManifest:
             )
             
             cards.append(card)
-            char_offset += len(chunk)
         
         return cards
     
-    def _split_into_chunks(self, content: str) -> list[str]:
+    def _split_into_chunks(self, content: str, file_path: Path) -> list:
         """Split content into chunks at natural boundaries."""
-        chunks = []
-        current_chunk = []
-        current_size = 0
-        
-        lines = content.split('\n')
-        
-        for line in lines:
-            line_with_newline = line + '\n'
-            line_size = len(line_with_newline)
+        if self.manual_chunking:
+            return self._split_from_markers(content)
+        else:
+            chunks = []
+            current_chunk = []
+            current_size = 0
             
-            # If adding this line would exceed max chunk size, save current chunk
-            if current_size + line_size > self.max_chunk and current_size > 0:
+            lines = content.split('\n')
+            
+            for line in lines:
+                line_with_newline = line + '\n'
+                line_size = len(line_with_newline)
+                
+                # If adding this line would exceed max chunk size, save current chunk
+                if current_size + line_size > self.max_chunk and current_size > 0:
+                    chunks.append(''.join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+                
+                current_chunk.append(line_with_newline)
+                current_size += line_size
+                
+                # If we've reached a good chunk size and hit a blank line, split here
+                if current_size >= self.min_chunk and not line.strip():
+                    chunks.append(''.join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+            
+            # Add remaining content
+            if current_chunk:
                 chunks.append(''.join(current_chunk))
-                current_chunk = []
-                current_size = 0
             
-            current_chunk.append(line_with_newline)
-            current_size += line_size
-            
-            # If we've reached a good chunk size and hit a blank line, split here
-            if current_size >= self.min_chunk and not line.strip():
-                chunks.append(''.join(current_chunk))
-                current_chunk = []
-                current_size = 0
-        
-        # Add remaining content
-        if current_chunk:
-            chunks.append(''.join(current_chunk))
-        
-        return chunks
-    
+            return chunks
+
+    def _split_from_markers(self, content: str) -> list[tuple[str, int, int]]:
+            """Split content into chunks based on manual markers '>>>CHUNK_BREAK<<<' generically, excluding markers.
+
+            This works across any file type, detecting the marker substring in lines (after stripping whitespace),
+            regardless of surrounding comment syntax (e.g., '//', '#', etc.).
+
+            Returns:
+                List of (chunk_content, char_start, char_end) tuples with non-empty chunks and original positions.
+            """
+            lines = content.splitlines(keepends=True)
+            chunks: list[tuple[str, int, int]] = []
+            current_chunk = ''
+            marker = '>>>CHUNK_BREAK<<<'
+            marker_count = 0
+            char_pos = 0
+            chunk_start = 0
+            for line in lines:
+                line_len = len(line)
+                # Check if the line contains the marker (allowing for leading/trailing whitespace or comments)
+                if marker in line.strip():
+                    if current_chunk.strip():  # Only append non-empty chunks
+                        chunks.append((current_chunk, chunk_start, char_pos))
+                    current_chunk = ''
+                    marker_count += 1
+                    chunk_start = char_pos + line_len  # Start next chunk after this marker line
+                else:
+                    if not current_chunk:  # Starting a new chunk
+                        chunk_start = char_pos
+                    current_chunk += line
+                char_pos += line_len
+            if current_chunk.strip():  # Append the final non-empty chunk
+                chunks.append((current_chunk, chunk_start, char_pos))
+            if not chunks and content.strip():
+                # Fallback: if no chunks were created but content exists, return it as a single chunk
+                chunks = [(content, 0, len(content))]
+            return chunks
+
     def _generate_card_id(self, relpath: str, index: int, content: str) -> str:
         """Generate unique card ID."""
         # Use sha256 for hashing
