@@ -17,13 +17,11 @@ from rich.table import Table
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pydantic import BaseModel, Field
 
 from analysis.scout import Scout
 from analysis.session_tracker import SessionTracker
 from analysis.strategist import Strategist
 from llm.token_tracker import get_token_tracker
-from llm.unified_client import UnifiedLLMClient
 
 
 def get_project_dir(project_id: str) -> Path:
