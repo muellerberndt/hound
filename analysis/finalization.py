@@ -131,13 +131,25 @@ class Finalizer(AutonomousAgent):
             # Independent repo search: augment context with likely relevant files
             if self._repo_root:
                 try:
-                    # Build keyword set from hypothesis
-                    kw = set()
-                    for k in (hypothesis.get('title', ''), hypothesis.get('description', ''), hypothesis.get('reasoning', '')):
-                        for token in (k or '').replace('\n', ' ').split():
-                            token = token.strip(".,:;(){}[]'\"<>\n\r\t")
-                            if len(token) >= 3 and token.isascii():
-                                kw.add(token.lower())
+                    # Build keyword set from hypothesis (split on non-alnum + camelCase)
+                    import re
+                    def _kw_from_text(*texts):
+                        kws = set()
+                        for raw in texts:
+                            s = str(raw) if raw else ''
+                            for tok in re.findall(r'[A-Za-z0-9_]{3,}', s):
+                                lk = tok.lower()
+                                kws.add(lk)
+                                subs = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+', tok)
+                                for sub in subs:
+                                    if len(sub) >= 3:
+                                        kws.add(sub.lower())
+                        return kws
+                    kw = _kw_from_text(
+                        hypothesis.get('title', ''),
+                        hypothesis.get('description', ''),
+                        hypothesis.get('reasoning', ''),
+                    )
                     for fn in hypothesis.get('properties', {}).get('affected_functions', []) or []:
                         if isinstance(fn, str) and fn:
                             kw.add(fn.lower())
@@ -197,14 +209,58 @@ class Finalizer(AutonomousAgent):
                         except Exception:
                             pass
 
-            # Build review context with source code
-            review_context = self._build_review_context(hyp_id, hypothesis, source_code)
-
-            # Get determination from model
-            determination = self._get_determination(review_context)
+            # Iterative review: decide -> if uncertain and missing context, expand -> retry
+            import re
+            attempt = 0
+            determination = None
+            while True:
+                attempt += 1
+                review_context = self._build_review_context(hyp_id, hypothesis, source_code)
+                determination = self._get_determination(review_context)
+                if determination.get('verdict') in ('confirmed', 'rejected'):
+                    break
+                if attempt >= max_iterations:
+                    break
+                # Expand context based on model reasoning (filenames + identifiers), limited budget
+                budget = 5
+                reason_low = str(determination.get('reasoning', '')).lower()
+                hints = set()
+                for m in re.findall(r"[A-Za-z0-9_\-/]+\.(rs|py|ts|tsx|js|jsx|go|sol|java|kt|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|sql|sh|rb|php)", reason_low):
+                    hints.add(m)
+                for tok in re.findall(r"[A-Za-z0-9_]{3,}", reason_low):
+                    hints.add(tok)
+                    for sub in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", tok):
+                        if len(sub) >= 3:
+                            hints.add(sub.lower())
+                added = 0
+                if self._repo_root and hints:
+                    for p in self._repo_root.rglob('*'):
+                        if added >= budget:
+                            break
+                        try:
+                            if not p.is_file():
+                                continue
+                            if p.stat().st_size > 400_000:
+                                continue
+                            rel = str(p.relative_to(self._repo_root))
+                            if rel in source_code:
+                                continue
+                            lname = rel.lower()
+                            if any(h in lname for h in hints):
+                                source_code[rel] = p.read_text(encoding='utf-8', errors='ignore')
+                                added += 1
+                        except Exception:
+                            continue
+                if progress_callback and added:
+                    try:
+                        progress_callback({'status': 'info', 'message': f"Added {added} file(s) for next iteration"})
+                    except Exception:
+                        pass
+                if added <= 0:
+                    break
 
             # Update hypothesis based on determination
-            if determination['verdict'] == 'confirmed':
+            if determination and determination.get('verdict') == 'confirmed':
                 self.finalize_store.adjust_confidence(hyp_id, 1.0, determination['reasoning'])
 
                 # Update status and store QA comment
@@ -238,7 +294,7 @@ class Finalizer(AutonomousAgent):
                     'reasoning': determination['reasoning']
                 })
 
-            elif determination['verdict'] == 'rejected':
+            elif determination and determination.get('verdict') == 'rejected':
                 self.finalize_store.adjust_confidence(hyp_id, 0.0, determination['reasoning'])
 
                 # Update status and store QA comment
@@ -346,7 +402,10 @@ class Finalizer(AutonomousAgent):
 
         return {
             "verdict": "uncertain",
-            "reasoning": "Failed to analyze",
+            "reasoning": (
+                "After reviewing the included files, there is insufficient code context to provide a definite verdict. "
+                "Load the concrete parsing/validation layers and the sink functions that enforce or perform the behavior under review."
+            ),
             "confidence": 0.5
         }
 

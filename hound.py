@@ -1016,7 +1016,15 @@ def finalize(
         'include_below_threshold': include_below_threshold,
         'debug': debug,
         'platform': platform,
-        'model': model
+        'model': model,
+        # Provide defaults for new finalize options so Click sees complete params
+        'include_files': (),
+        'filename_regexes': (),
+        'text_regexes': (),
+        'ignore_case': False,
+        'max_search_files': 10,
+        'no_ext_filter': False,
+        'max_iters': 3,
     }
     
     try:

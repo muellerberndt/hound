@@ -27,7 +27,16 @@ console = Console()
 @click.option('--debug', is_flag=True, help="Enable debug mode")
 @click.option('--platform', default=None, help='Override QA platform (e.g., openai, anthropic, mock)')
 @click.option('--model', default=None, help='Override QA model (e.g., gpt-4o-mini)')
-def finalize(project_name: str, threshold: float, include_below_threshold: bool, debug: bool, platform: str | None, model: str | None):
+@click.option('--include-file', 'include_files', multiple=True, help='Additional file(s) to include (relative to repo root); repeatable')
+@click.option('--filename-regex', 'filename_regexes', multiple=True, help='Regex pattern to include files by path; repeatable')
+@click.option('--text-regex', 'text_regexes', multiple=True, help='Regex pattern to include files by content; repeatable')
+@click.option('--ignore-case', is_flag=True, help='Case-insensitive regex matching for --filename-regex/--text-regex')
+@click.option('--max-search-files', type=int, default=10, help='Max files to add from regex searches (default: 10)')
+@click.option('--no-ext-filter', is_flag=True, help='Search all files (not only common code extensions)')
+@click.option('--max-iters', type=int, default=3, help='Max iterations to fetch more files and retry when uncertain (default: 3)')
+def finalize(project_name: str, threshold: float, include_below_threshold: bool, debug: bool, platform: str | None, model: str | None,
+             include_files: tuple[str, ...], filename_regexes: tuple[str, ...], text_regexes: tuple[str, ...], ignore_case: bool,
+             max_search_files: int, no_ext_filter: bool, max_iters: int):
     """
     Finalize hypotheses in a project by reviewing high-confidence findings.
     
@@ -222,28 +231,8 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
             task = progress.add_task(task_desc, total=1)
             
             try:
-                # Get source files from hypothesis and augment heuristically
+                # Start only from associated files provided by the hypothesis
                 source_files = list(hypothesis.get('properties', {}).get('source_files', []) or [])
-                hypothesis.get('node_refs', [])
-                # Heuristic: guess file paths from title/description/reasoning/evidence text
-                try:
-                    from analysis.path_utils import guess_relpaths
-                    extra_texts = [
-                        hypothesis.get('title', ''),
-                        hypothesis.get('description', ''),
-                        hypothesis.get('reasoning', ''),
-                    ]
-                    for ev in hypothesis.get('evidence', []) or []:
-                        if isinstance(ev, dict):
-                            extra_texts.append(ev.get('description', '') or '')
-                        elif isinstance(ev, str):
-                            extra_texts.append(ev)
-                    guessed = guess_relpaths("\n".join([t for t in extra_texts if t]), repo_root)
-                    for rel in guessed:
-                        if rel not in source_files:
-                            source_files.append(rel)
-                except Exception:
-                    pass
                 
                 # Load source code (direct from repo when possible)
                 source_code = {}
@@ -261,73 +250,32 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
                                 progress.console.print(f"  [red]Failed to load {file_path}: {e}[/red]")
                 if source_code:
                     progress.console.print(f"  [dim]Loaded {len(source_code)} file(s) from source_files[/dim]")
-                
-                # Independent search: if still empty, scan repo_root for relevant files
-                if not source_code and repo_root:
-                    if debug:
-                        progress.console.print("  [dim]Searching repository for relevant files...[/dim]")
-                    try:
-                        # Build simple keyword set from hypothesis text
-                        kw = set()
-                        for k in (hypothesis.get('title', ''), hypothesis.get('description', ''), hypothesis.get('reasoning', '')):
-                            for token in (k or '').replace('\n', ' ').split():
-                                token = token.strip(".,:;(){}[]'\"<>\n\r\t")
-                                if len(token) >= 3 and token.isascii():
-                                    kw.add(token.lower())
-                        # Include affected function names
-                        for fn in hypothesis.get('properties', {}).get('affected_functions', []) or []:
-                            if isinstance(fn, str) and fn:
-                                kw.add(fn.lower())
-                        # Scan for relevant files by name/ext and keyword hits
-                        exts = {'.rs','.py','.ts','.tsx','.js','.jsx','.go','.sol','.java','.kt','.swift','.c','.cc','.cpp','.h','.hpp','.yaml','.yml','.toml','.json','.sql','.sh','.rb','.php'}
-                        candidates: list[tuple[int, Path]] = []
-                        max_files = 10
-                        for p in repo_root.rglob('*'):
-                            try:
-                                if not p.is_file():
-                                    continue
-                                if p.suffix.lower() not in exts:
-                                    continue
-                                # Light size cap to avoid huge files
-                                if p.stat().st_size > 400_000:
-                                    continue
-                                name_score = 0
-                                lname = p.name.lower()
-                                for t in kw:
-                                    if t and t in lname:
-                                        name_score += 2
-                                if name_score == 0 and not source_files:
-                                    # Avoid reading too many files with no hint
-                                    continue
-                                # Read and score by keyword occurrences
-                                score = name_score
-                                try:
-                                    text = p.read_text(encoding='utf-8', errors='ignore')
-                                    ltext = text.lower()
-                                    hits = sum(ltext.count(t) for t in kw if len(t) > 3)
-                                    score += hits
-                                except Exception:
-                                    continue
-                                if score > 0:
-                                    candidates.append((score, p))
-                            except Exception:
+
+                # Explicit inclusions via CLI
+                if include_files and repo_root:
+                    added_explicit = 0
+                    for rel in include_files:
+                        try:
+                            fp = (repo_root / rel).resolve()
+                            # Ensure the file is inside repo_root
+                            if not str(fp).startswith(str(repo_root.resolve())):
                                 continue
-                        candidates.sort(key=lambda x: x[0], reverse=True)
-                        before = len(source_code)
-                        for _, fp in candidates[:max_files]:
-                            try:
-                                rel = str(fp.relative_to(repo_root))
-                                source_code[rel] = fp.read_text(encoding='utf-8', errors='ignore')
-                            except Exception:
-                                continue
-                    except Exception:
-                        pass
-                    added = len(source_code) - (before if 'before' in locals() else 0)
-                    if added > 0:
-                        progress.console.print(f"  [dim]Repo search added {added} file(s)[/dim]")
+                            if fp.is_file():
+                                content = fp.read_text(encoding='utf-8', errors='ignore')
+                                key = str(fp.relative_to(repo_root))
+                                if key not in source_code:
+                                    source_code[key] = content
+                                    added_explicit += 1
+                        except Exception:
+                            continue
+                    if added_explicit:
+                        progress.console.print(f"  [dim]Included {added_explicit} file(s) via --include-file[/dim]")
                 
-                # Build review prompt
-                review_prompt = f"""You are a security expert performing final review of a vulnerability hypothesis.
+                # Proactive searches are performed only inside the iterative expansion below
+                
+                # Helper: build review prompt from current source_code
+                def _build_prompt(src_map: dict[str, str]) -> str:
+                    prompt = f"""You are a security expert performing final review of a vulnerability hypothesis.
 
 === HYPOTHESIS UNDER REVIEW ===
 Title: {hypothesis.get('title', 'Unknown')}
@@ -338,13 +286,12 @@ Description: {hypothesis.get('description', '')}
 
 === SOURCE CODE ===
 """
-                if source_code:
-                    for file_path, code in source_code.items():
-                        review_prompt += f"\n--- File: {file_path} ---\n{code}\n"
-                else:
-                    review_prompt += "No source code available.\n"
-                
-                review_prompt += """
+                    if src_map:
+                        for file_path, code in src_map.items():
+                            prompt += f"\n--- File: {file_path} ---\n{code}\n"
+                    else:
+                        prompt += "No source code available.\n"
+                    prompt += """
 === YOUR TASK ===
 Review the SOURCE CODE to determine if this hypothesis represents a REAL vulnerability.
 
@@ -357,41 +304,160 @@ Focus on:
 Provide your determination in this EXACT JSON format:
 {
     "verdict": "confirmed" or "rejected" or "uncertain",
-    "reasoning": "A detailed one-paragraph explanation (100-200 words) suitable for a security report. Start with 'Upon reviewing...' or 'After analyzing...' and explain what you examined, what you found, and why you reached your conclusion. Be specific about code elements, line numbers, and functions you reviewed.",
+    "reasoning": "A detailed one-paragraph explanation (100-200 words) suitable for a security report.",
     "confidence": 0.0 to 1.0
 }
 
-Rules:
-- "confirmed" = Vulnerability clearly exists in the code with exploitable path
-  Write like: "After analyzing the [specific function/contract] at [location], I confirmed this [vulnerability type] is exploitable. [Explain what makes it vulnerable, specific code patterns observed, and why existing protections are insufficient]."
-
-- "rejected" = Code analysis shows this is a false positive or mitigated
-  Write like: "Upon reviewing the alleged [vulnerability type] in [specific location], I determined this is a false positive. [Explain what protections exist, why the vulnerability cannot be exploited, or what was misunderstood in the initial hypothesis]."
-
-- "uncertain" = Need more code context to determine
-  Write like: "After examining the [specific area], I cannot definitively confirm or reject this [vulnerability type]. [Explain what was reviewed, what remains unclear, and what additional analysis would be needed for a definitive verdict]."
-
 Be conservative - only confirm if the code clearly shows the vulnerability.
 """
+                    return prompt
                 
-                # Get LLM verdict
-                try:
-                    # Use raw() method and parse JSON response (robust to code fences)
-                    response_text = llm.raw(system="You are a security expert. Respond only with valid JSON.", user=review_prompt)
-                    from utils.json_utils import extract_json_object
-                    response = extract_json_object(response_text)
-                    if isinstance(response, dict):
-                        result = ReviewResult(
-                            verdict=response.get('verdict', 'uncertain'),
-                            reasoning=response.get('reasoning', 'No reasoning provided'),
-                            confidence=response.get('confidence', 0.5)
-                        )
-                    else:
-                        result = ReviewResult(verdict='uncertain', reasoning='Failed to parse response')
-                except Exception as e:
+                # Get LLM verdict (with augmentation loop if uncertain and repo available)
+                def _ask_llm(prompt: str) -> ReviewResult:
+                    try:
+                        response_text = llm.raw(system="You are a security expert. Respond only with valid JSON.", user=prompt)
+                        from utils.json_utils import extract_json_object
+                        response = extract_json_object(response_text)
+                        if isinstance(response, dict):
+                            verdict = response.get('verdict', 'uncertain')
+                            reasoning = response.get('reasoning')
+                            if not isinstance(reasoning, str) or not reasoning.strip():
+                                reasoning = (
+                                    "After reviewing the included files, there is insufficient code context to provide a definite verdict. "
+                                    "Load the concrete parsing/validation layers and the sink functions that enforce or perform the behavior under review."
+                                )
+                            conf = response.get('confidence', 0.5)
+                            try:
+                                conf = float(conf)
+                            except Exception:
+                                conf = 0.5
+                            return ReviewResult(verdict=verdict, reasoning=reasoning, confidence=conf)
+                        return ReviewResult(verdict='uncertain', reasoning='Failed to parse response')
+                    except Exception as e:
+                        if debug:
+                            progress.console.print(f"  [red]LLM error: {e}[/red]")
+                        return ReviewResult(verdict='uncertain', reasoning='LLM error')
+
+                # Augment context based on model reasoning and optional regex filters
+                import re
+                flags = re.IGNORECASE if ignore_case else 0
+                fn_patterns = [re.compile(p, flags) for p in filename_regexes]
+                txt_patterns = [re.compile(p, flags) for p in text_regexes]
+                exts_filter = None if no_ext_filter else {'.rs','.py','.ts','.tsx','.js','.jsx','.go','.sol','.java','.kt','.swift','.c','.cc','.cpp','.h','.hpp','.yaml','.yml','.toml','.json','.sql','.sh','.rb','.php'}
+
+                def _augment_from_reasoning(reasoning: str, budget: int) -> int:
+                    if not repo_root or budget <= 0:
+                        return 0
+                    try:
+                        added = 0
+                        # 1) Filename regex-based additions
+                        if fn_patterns:
+                            for p in repo_root.rglob('*'):
+                                if added >= budget:
+                                    break
+                                try:
+                                    if not p.is_file():
+                                        continue
+                                    if exts_filter is not None and p.suffix.lower() not in exts_filter:
+                                        continue
+                                    rel = str(p.relative_to(repo_root))
+                                    if rel in source_code:
+                                        continue
+                                    if any(r.search(rel) for r in fn_patterns) and p.stat().st_size <= 400_000:
+                                        source_code[rel] = p.read_text(encoding='utf-8', errors='ignore')
+                                        added += 1
+                                except Exception:
+                                    continue
+                        # 2) Text regex-based additions
+                        if txt_patterns and added < budget:
+                            for p in repo_root.rglob('*'):
+                                if added >= budget:
+                                    break
+                                try:
+                                    if not p.is_file():
+                                        continue
+                                    if exts_filter is not None and p.suffix.lower() not in exts_filter:
+                                        continue
+                                    rel = str(p.relative_to(repo_root))
+                                    if rel in source_code:
+                                        continue
+                                    if p.stat().st_size > 400_000:
+                                        continue
+                                    text = p.read_text(encoding='utf-8', errors='ignore')
+                                    if any(r.search(text) for r in txt_patterns):
+                                        source_code[rel] = text
+                                        added += 1
+                                except Exception:
+                                    continue
+                        if added >= budget:
+                            return added
+                        # 3) Heuristic additions from reasoning hints
+                        hints = set()
+                        for m in re.findall(r"[A-Za-z0-9_\-/]+\.(rs|py|ts|tsx|js|jsx|go|sol|java|kt|swift|c|cc|cpp|h|hpp|yaml|yml|toml|json|sql|sh|rb|php)", reasoning or '', flags):
+                            hints.add(m.lower())
+                        for tok in re.findall(r"[A-Za-z0-9_]{3,}", reasoning or '', flags):
+                            hints.add(tok.lower())
+                            for sub in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", tok):
+                                if len(sub) >= 3:
+                                    hints.add(sub.lower())
+                        if hints:
+                            candidates: list[tuple[int, Path]] = []
+                            for p in repo_root.rglob('*'):
+                                try:
+                                    if not p.is_file():
+                                        continue
+                                    if exts_filter is not None and p.suffix.lower() not in exts_filter:
+                                        continue
+                                    if p.stat().st_size > 400_000:
+                                        continue
+                                    rel = str(p.relative_to(repo_root))
+                                    if rel in source_code:
+                                        continue
+                                    name_score = sum(2 for h in hints if h in rel.lower())
+                                    if name_score == 0:
+                                        continue
+                                    try:
+                                        ltext = p.read_text(encoding='utf-8', errors='ignore').lower()
+                                    except Exception:
+                                        continue
+                                    score = name_score + sum(ltext.count(h) for h in hints if len(h) > 3)
+                                    if score > 0:
+                                        candidates.append((score, p))
+                                except Exception:
+                                    continue
+                            candidates.sort(key=lambda x: x[0], reverse=True)
+                            for _, fp in candidates:
+                                if added >= budget:
+                                    break
+                                rel = str(fp.relative_to(repo_root))
+                                if rel in source_code:
+                                    continue
+                                try:
+                                    source_code[rel] = fp.read_text(encoding='utf-8', errors='ignore')
+                                    added += 1
+                                except Exception:
+                                    continue
+                        return added
+                    except Exception:
+                        return 0
+
+                # Iterative loop: ask -> if uncertain, expand -> retry (up to max-iters)
+                attempt = 0
+                while True:
+                    attempt += 1
                     if debug:
-                        progress.console.print(f"  [red]LLM error: {e}[/red]")
-                    result = ReviewResult(verdict='uncertain', reasoning='LLM error')
+                        progress.console.print(f"  [dim]Iteration {attempt}/{max_iters}: requesting verdict[/dim]")
+                    review_prompt = _build_prompt(source_code)
+                    result = _ask_llm(review_prompt)
+                    if result.verdict in ("confirmed", "rejected"):
+                        break
+                    if attempt >= max_iters or not repo_root:
+                        break
+                    added = _augment_from_reasoning(result.reasoning or '', max_search_files)
+                    if added <= 0:
+                        break
+                    progress.console.print(f"  [dim]Added {added} file(s) for next iteration[/dim]")
+                    # next iteration will rebuild prompt with updated source_code
                 
                 # Apply verdict
                 if result.verdict == "confirmed":
