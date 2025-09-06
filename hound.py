@@ -112,8 +112,9 @@ def project_info(name: str = typer.Argument(..., help="Project name")):
 @project_app.command("coverage")
 def project_coverage(name: str = typer.Argument(..., help="Project name")):
     """Show coverage metrics for a project (nodes and cards)."""
-    from analysis.coverage_index import CoverageIndex
     import json as _json
+
+    from analysis.coverage_index import CoverageIndex
     manager = ProjectManager()
     proj = manager.get_project(name)
     if not proj:
@@ -830,7 +831,8 @@ def graph_export_cards(
     """Export full cards with content for a project."""
     import json
     from pathlib import Path
-    from analysis.cards import load_card_index, extract_card_content
+
+    from analysis.cards import extract_card_content, load_card_index
     manager = ProjectManager()
     proj = manager.get_project(project)
     if not proj:

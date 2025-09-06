@@ -8,9 +8,8 @@ mentioned in strategist outputs, hypothesis descriptions, or evidence notes.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
-
 
 _EXTENSIONS = (
     "rs", "sol", "vy", "json", "toml", "yaml", "yml", "py", "go",
