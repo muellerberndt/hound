@@ -1068,10 +1068,10 @@ class AgentRunner:
                     line = f"• [{nid}] {lbl} ({typ})"
                     annotations = []
                     if observations:
-                        obs_str = '; '.join(observations[:3])
+                        obs_str = '; '.join(observations[:-3])
                         annotations.append(f"obs:{obs_str}")
                     if assumptions:
-                        assum_str = '; '.join(assumptions[:3])
+                        assum_str = '; '.join(assumptions[:-3])
                         annotations.append(f"asm:{assum_str}")
                     if annotations:
                         line += f" [{' | '.join(annotations)}]"
