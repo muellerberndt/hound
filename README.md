@@ -62,6 +62,45 @@ export OPENAI_API_KEY=your_key_here
 export OPENAI_BASE_URL=https://api.openai.com
 ```
 
+Using Gemini via Vertex AI (optional):
+
+- Enable Vertex AI mode (instead of AI Studio) and set your GCP project and region.
+- Credentials are taken from ADC (Application Default Credentials) or a service account; GOOGLE_API_KEY is not used in Vertex AI mode.
+
+```bash
+# Enable Vertex AI routing for Gemini
+export GOOGLE_USE_VERTEX_AI=1
+
+# Provide project and region (region examples: us-central1, europe-west1, asia-northeast1, etc.)
+export VERTEX_PROJECT_ID=my-gcp-project
+export VERTEX_LOCATION=us-central1
+# Alternatively (fallbacks also supported):
+# export GOOGLE_CLOUD_PROJECT=my-gcp-project
+# export GOOGLE_CLOUD_REGION=us-central1
+
+# Authenticate (one of the following)
+# 1) Use gcloud ADC (recommended for local dev):
+#    gcloud auth application-default login
+# 2) Or point to a service account key file:
+#    export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+```
+
+When configured, the effective Vertex AI endpoint will be constructed as:
+https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}
+For example:
+https://us-central1-aiplatform.googleapis.com/v1/projects/my-gcp-project/locations/us-central1
+
+Optional: configure via config.yaml instead of env vars:
+
+```yaml
+gemini:
+  api_key_env: GOOGLE_API_KEY
+  vertex_ai:
+    enabled: true
+    project_id: "my-gcp-project"
+    region: "us-central1"
+```
+
 Copy the example configuration and edit as needed:
 
 ```bash

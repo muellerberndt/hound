@@ -8,6 +8,15 @@ openai:
 
 gemini:
   api_key_env: GOOGLE_API_KEY
+  # Vertex AI (optional). When enabled, the Gemini provider will use Vertex AI
+  # instead of AI Studio. Credentials are resolved from Application Default
+  # Credentials (ADC) or a service account, not the GOOGLE_API_KEY.
+  vertex_ai:
+    enabled: false
+    # Your Google Cloud Project ID (alternatively set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT)
+    project_id: ""
+    # Region/location for Vertex AI (e.g., "us-central1"; alternatively set VERTEX_LOCATION or GOOGLE_CLOUD_REGION)
+    region: ""
 
 anthropic:
   api_key_env: ANTHROPIC_API_KEY

@@ -93,11 +93,40 @@ class GeminiProvider(BaseLLMProvider):
         self._client = None  # Only for new SDK
         self._client_flavor = "genai-new" if self._use_new else ("genai-legacy" if _genai_legacy is not None else "none")
 
-        # Get API key from environment
-        api_key_env = config.get("gemini", {}).get("api_key_env", "GOOGLE_API_KEY")
-        api_key = os.environ.get(api_key_env)
-        if not api_key:
-            raise ValueError(f"API key not found in environment variable: {api_key_env}")
+        # Vertex AI configuration (optional)
+        gcfg = config.get("gemini", {}) if isinstance(config, dict) else {}
+        vcfg = gcfg.get("vertex_ai", {}) if isinstance(gcfg, dict) else {}
+        env_use_vertex = os.environ.get("GOOGLE_USE_VERTEX_AI", "").lower() in {"1","true","yes","on"}
+        self._use_vertex = bool(vcfg.get("enabled", False) or env_use_vertex)
+
+        # Resolve project and region when Vertex AI is enabled
+        self._vertex_project = None
+        self._vertex_region = None
+        self._vertex_endpoint_url = None
+        if self._use_vertex:
+            proj = vcfg.get("project_id") or os.environ.get("VERTEX_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+            loc = vcfg.get("region") or vcfg.get("location") or os.environ.get("VERTEX_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION") or os.environ.get("GOOGLE_CLOUD_ZONE")
+            # Convert zone to region if needed (e.g., "us-central1-a" -> "us-central1")
+            if isinstance(loc, str) and loc.count("-") >= 2:
+                try:
+                    parts = loc.split("-")
+                    loc = "-".join(parts[:2])
+                except Exception:
+                    pass
+            self._vertex_project = proj
+            self._vertex_region = loc
+            if proj and loc:
+                base = f"https://{loc}-aiplatform.googleapis.com"
+                self._vertex_endpoint_url = f"{base}/v1/projects/{proj}/locations/{loc}"
+            # No API key required for Vertex; uses ADC / service account
+            api_key_env = gcfg.get("api_key_env", "GOOGLE_API_KEY")
+            api_key = os.environ.get(api_key_env)  # May be None; not required in Vertex mode
+        else:
+            # API key path (AI Studio)
+            api_key_env = gcfg.get("api_key_env", "GOOGLE_API_KEY")
+            api_key = os.environ.get(api_key_env)
+            if not api_key:
+                raise ValueError(f"API key not found in environment variable: {api_key_env}")
         
         # Determine generation defaults; explicitly set max_output_tokens high
         # If not provided, many models default to their maximum output limit.
@@ -113,10 +142,21 @@ class GeminiProvider(BaseLLMProvider):
         if self._use_new:
             # New SDK client
             try:
-                self._client = _genai_new.Client(api_key=api_key)
+                if self._use_vertex:
+                    # Vertex AI routing (uses ADC or service account credentials)
+                    if self._vertex_project and self._vertex_region:
+                        self._client = _genai_new.Client(vertexai=True, project=self._vertex_project, location=self._vertex_region)
+                    else:
+                        # Let the SDK pick up project/location from env/ADC if not provided
+                        self._client = _genai_new.Client(vertexai=True)
+                else:
+                    self._client = _genai_new.Client(api_key=api_key)
             except TypeError:
-                # Older versions may pull api key from env
-                self._client = _genai_new.Client()
+                # Fallbacks for older client signatures
+                if self._use_vertex:
+                    self._client = _genai_new.Client(vertexai=True)
+                else:
+                    self._client = _genai_new.Client()
             self.model = model_name  # Keep a simple name for new API
         else:
             # Legacy SDK configuration and model instance (or patched test double)
